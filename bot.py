@@ -1,7 +1,5 @@
 import os
 import logging
-import threading
-from flask import Flask
 from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters
 
@@ -13,17 +11,6 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 TOKEN = os.getenv("TOKEN")
-PORT = int(os.environ.get("PORT", 10000))
-
-# Dummy web server to satisfy Render's port binding requirement
-app_web = Flask(__name__)
-
-@app_web.route('/')
-def home():
-    return "Ovi's Bot is running successfully!"
-
-def run_web():
-    app_web.run(host="0.0.0.0", port=PORT)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome_text = (
@@ -63,11 +50,6 @@ def main():
     if not TOKEN:
         logger.error("CRITICAL: TOKEN environment variable is missing.")
         return
-
-    # Start the dummy web server in a separate thread for Render
-    web_thread = threading.Thread(target=run_web)
-    web_thread.daemon = True
-    web_thread.start()
 
     # Telegram Bot Setup
     app = ApplicationBuilder().token(TOKEN).build()
