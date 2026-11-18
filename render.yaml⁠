@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: ff-bot
+    runtime: python
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "python bot.py"
+    envVars:
+      - key: TOKEN
+        value: "9118120553:AAFpjlTWPK3rX8kX2W7G37fCuLXukVtUjmA"
