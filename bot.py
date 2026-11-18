@@ -1,4 +1,15 @@
 import os
+import subprocess
+import sys
+
+# Auto-install missing libraries at runtime
+for package in ["python-telegram-bot==20.7", "requests"]:
+    try:
+        __import__(package.split("==")[0])
+    except ImportError:
+        subprocess.check_call([sys.executable, "-m", "pip", "install", package])
+
+import os
 import logging
 from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters
