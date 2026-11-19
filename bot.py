@@ -1,11 +1,8 @@
-import json
 import logging
 import os
 import random
 import subprocess
 import sys
-import time
-from pathlib import Path
 
 # Ensure python-telegram-bot is installed at runtime
 try:
@@ -24,291 +21,190 @@ logger = logging.getLogger(__name__)
 
 TOKEN = os.getenv("TOKEN")
 
-# Follow-up timing configuration (in seconds)
-# 1800 seconds = 30 minutes (you can change to 600 for 10 mins or 3600 for 1 hour)
-FOLLOWUP_DELAY_SECONDS = 1800
-CHECK_INTERVAL_SECONDS = 60
-MAX_FOLLOWUPS_PER_ISSUE = 2
-
-DATA_FILE = Path("followups.json")
-
-
-def load_followups() -> dict:
-    if not DATA_FILE.exists():
-        return {}
-    try:
-        return json.loads(DATA_FILE.read_text(encoding="utf-8"))
-    except Exception as e:
-        logger.error(f"Failed to load followups.json: {e}")
-        return {}
-
-
-def save_followups(data: dict) -> None:
-    try:
-        DATA_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    except Exception as e:
-        logger.error(f"Failed to save followups.json: {e}")
-
 
 def _pick(options: list[str]) -> str:
     return random.choice(options)
 
 
-def is_resolved_reply(lower: str) -> bool:
-    resolved_words = [
-        "সমাধান হয়েছে", "ঠিক হয়ে গেছে", "কাজ করছে", "হয়ে গেছে",
-        "solved", "fixed", "done", "thik hoye geche", "kaj korche", "solve hoye geche"
-    ]
-    return any(w in lower for w in resolved_words)
-
-
-def is_still_problem_reply(lower: str) -> bool:
-    unresolved_words = [
-        "হয়নি", "হচ্ছে না", "আটকে আছে", "একই সমস্যা", "কাজ করছে না",
-        "not solved", "still", "hoyni", "hocche na", "kaj korche na", "problem"
-    ]
-    return any(w in lower for w in unresolved_words)
-
-
-def build_daily_help_reply(raw_text: str, active_issue: dict | None) -> tuple[str, bool]:
+def detect_language_style(text: str) -> str:
     """
-    Returns (reply_text, should_track_as_new_issue).
-    should_track_as_new_issue=True means bot should follow up later on this issue.
+    Detect user's language style so replies match naturally:
+    - 'bn': Bangla script
+    - 'ur_hi_script': Devanagari / Urdu script
+    - 'roman_hi_ur': Romanized Hindi / Urdu
+    - 'en_banglish': English / Banglish
     """
+    if any("\u0980" <= ch <= "\u09ff" for ch in text):
+        return "bn"
+    if any("\u0900" <= ch <= "\u097f" for ch in text) or any("\u0600" <= ch <= "\u06ff" for ch in text):
+        return "ur_hi_script"
+
+    lower = text.lower()
+    hi_ur_markers = [
+        "kya", "kaise", "hai", "hain", "hoon", "hun", "nahi", "nhi", "acha", "accha",
+        "theek", "thik", "samajh", "madad", "batao", "bataiye", "mera", "meri", "tumhara",
+        "aap", "kuch", "kyun", "kyu", "kab", "kahan", "bahut", "zaroor", "shukriya", "meherbani"
+    ]
+    words = set(lower.replace("?", " ").replace("!", " ").replace(",", " ").replace(".", " ").split())
+    if len(words.intersection(hi_ur_markers)) >= 1 and not any(
+        w in words for w in ["ami", "tumi", "apni", "kemon", "kivabe", "ki", "korbo", "parchi", "pari", "valo", "bhalo"]
+    ):
+        return "roman_hi_ur"
+
+    return "en_banglish"
+
+
+def build_smart_reply(raw_text: str) -> str:
     text = raw_text.strip()
     lower = text.lower()
+    style = detect_language_style(text)
 
-    # If user is replying to an active follow-up
-    if active_issue and active_issue.get("awaiting_status"):
-        issue_summary = active_issue.get("summary", "ওই বিষয়টা")
-
-        if is_resolved_reply(lower):
-            return (
-                f"দারুণ! শুনে ভালো লাগলো যে '{issue_summary}' নিয়ে তোমার কাজটা মিটে গেছে। "
-                "দৈনন্দিন জীবনে আর কোনো সাহায্য লাগলে নির্দ্বিধায় বলো।",
-                False,
-            )
-
-        if is_still_problem_reply(lower):
-            return (
-                f"বুঝলাম, '{issue_summary}' নিয়ে এখনো ঝামেলা হচ্ছে। "
-                "একটু ভেঙে বলো তো ঠিক কোন জায়গায় আটকাচ্ছো—তাহলে আরেকটু সহজ উপায় দেখছি।",
-                True,
-            )
-
-    # 1. Greetings / casual opening
+    # 1. Greetings
     greetings = [
-        "হ্যালো", "হাই", "hello", "hi", "hey", "সালাম",
-        "আসসালামু", "assalamu", "কেমন আছো", "কেমন আছেন",
-        "kemon acho", "kemon achen", "ki khobor", "কি খবর"
+        "হ্যালো", "হাই", "hello", "hi", "hey", "সালাম", "আসসালামু", "assalamu", "salam",
+        "কেমন আছো", "কেমন আছেন", "kemon acho", "kemon achen", "ki khobor", "কি খবর",
+        "namaste", "नमस्ते", "kya haal", "kaise ho", "kaisi ho", "kya حال", "سلام"
     ]
-    if any(w in lower for w in greetings) and len(lower) <= 35:
-        return (
-            _pick([
-                "জি বলছি আমি! ভালো আছি, তুমি কেমন আছো? আজকের দিনে কোনো কাজ বা সমস্যা নিয়ে হেল্প লাগলে বলো।",
-                "হ্যাঁ ভাই, বলো! কী নিয়ে সাহায্য লাগবে বা কোন বিষয়টা নিয়ে কথা বলতে চাচ্ছো?",
-                "আরে বলো! আমি আছি তো—দৈনন্দিন কোনো সমস্যা বা প্রশ্ন থাকলে খুলে বলো।"
-            ]),
-            False,
-        )
+    if any(w in lower for w in greetings) and len(lower) <= 40:
+        if style == "ur_hi_script":
+            return _pick([
+                "जी बिल्कुल, बताइए क्या मदद चाहिए? कोई सवाल या परेशानी है तो खुलकर पूछिए।",
+                "جی بالکل، بتائیے کیا مدد چاہیے؟ کوئی مسئلہ یا سوال ہو تو ضرور پوچھیے۔"
+            ])
+        if style == "roman_hi_ur":
+            return _pick([
+                "Haan bilkul, batao kya help chahiye? Koi problem ya sawaal ho to seedha pucho.",
+                "Ji bilkul, main yahan hoon. Kis topic par madad chahiye batao?"
+            ])
+        return _pick([
+            "জি বলছি আমি! কী নিয়ে হেল্প লাগবে, সোজা বাংলা বা ইংলিশে বলো।",
+            "হ্যাঁ, বলো! তোমার কোন বিষয়টা নিয়ে সাহায্য বা সমাধান দরকার?"
+        ])
 
-    # 2. Identity / creator logic (only when asked directly)
+    # 2. Identity / Ovi
     identity_triggers = [
         "ovi", "অভি", "কে বানিয়েছে", "কে তৈরি", "তোর মালিক", "তোমার মালিক",
-        "কার বট", "কে তুই", "তুমি কে", "tumi ke", "tui ke", "পরিচয়", "admin", "অ্যাডমিন"
+        "কার বট", "কে তুই", "তুমি কে", "tumi ke", "tui ke", "who made you",
+        "kisne banaya", "kaun ho", "تم کون ہو", "کس نے بنایا"
     ]
     if any(w in lower for w in identity_triggers):
+        if style == "ur_hi_script":
+            return "यह बॉट Ovi ने बनाया है ताकि रोज़मर्रा के काम और सवालों में आसान मदद मिल सके। बताइए आपको क्या जानना है?"
+        if style == "roman_hi_ur":
+            return "Ye bot Ovi ne banaya hai taaki daily problems aur sawalon mein aasan help mil sake. Batao tumhe kya jaanna hai?"
+        return "এটা অভির বানানো হেল্পিং বট—দৈনন্দিন সমস্যা ও প্রশ্নে সহজ সমাধান দেওয়ার জন্য রাখা হয়েছে। বলো, তোমার কী লাগবে?"
+
+    # 3. Network / Internet / Speed / Lag / Phone
+    tech_triggers = [
+        "নেট", "net", "ইন্টারনেট", "internet", "ওয়াইফাই", "wifi", "wi-fi",
+        "স্লো", "slow", "ল্যাগ", "lag", "পিং", "ping", "ফোন", "phone",
+        "hang", "হ্যাং", "গরম", "data", "ডেটা", "network", "नेट", "इंटरनेट", "स्लो", "انٹرنیٹ", "نیٹ"
+    ]
+    if any(w in lower for w in tech_triggers):
+        if style == "ur_hi_script":
+            return (
+                "नेट या फ़ोन स्लो/लैग होने पर ये आसान स्टेप्स आज़माएँ:\n"
+                "• बैकग्राउंड में चल रहे भारी ऐप्स या डाउनलोड बंद करें।\n"
+                "• नेटवर्क अस्थिर हो तो फ़्लाइट मोड ऑन-ऑफ़ करके दोबारा देखें।\n"
+                "• फ़ोन गर्म हो या स्टोरेज बहुत भरा हो तो कुछ जगह खाली करें और थोड़ा आराम दें।"
+            )
+        if style == "roman_hi_ur":
+            return (
+                "Net ya phone slow/lag ho raha ho to ye simple steps try karo:\n"
+                "• Background ke heavy apps aur downloads band karo.\n"
+                "• Network weak lage to airplane mode on-off karke check karo.\n"
+                "• Phone garam ho ya storage full ho to thodi jagah khali karke try karo."
+            )
         return (
-            _pick([
-                "আমি অভির বানানো হেল্পিং বট—মানুষের দৈনন্দিন ছোটখাটো সমস্যা ও প্রশ্নে সহজ বাংলায় পাশে থাকার জন্য বানানো হয়েছে। বলো, তোমার কী হেল্প লাগবে?",
-                "এটা অভির বট। মূলত সবার যেন সাধারণ সমস্যায় একটা সহজ সমাধান বা দিকনির্দেশনা পাওয়া যায়, সেভাবেই সাজানো। তুমি কী জানতে চাচ্ছো?"
-            ]),
-            False,
+            "নেট বা ফোন স্লো/ল্যাগ করলে সরাসরি এই কাজগুলো করে দেখো:\n"
+            "• ব্যাকগ্রাউন্ডে ভারী অ্যাপ বা কোনো ডাউনলোড চলছে কি না বন্ধ করো।\n"
+            "• নেটওয়ার্ক দুর্বল থাকলে একবার এয়ারপ্লেন মোড অন-অফ বা কানেকশন রিসেট করো।\n"
+            "• ফোন গরম হলে বা স্টোরেজ একদম ভরে গেলে কিছু জায়গা খালি করে একটু বিরতি দাও।"
         )
 
-    # 3. Capabilities / help overview
-    capability_triggers = [
-        "কি কি করতে পারো", "কী কী করতে পারো", "ki ki korte paro",
-        "কি পারো", "ki paro", "কাজ কি", "কিভাবে সাহায্য", "হেল্প", "help"
-    ]
-    if any(w in lower for w in capability_triggers):
-        return (
-            "আমি দৈনন্দিন জীবনের নানা সাধারণ বিষয়ে তোমাকে হেল্প করতে পারি:\n"
-            "• নেটওয়ার্ক, ইন্টারনেট বা ফোন স্লো/গরম হওয়ার প্রাথমিক সমাধান\n"
-            "• অ্যাকাউন্ট লগইন, সেফটি বা অনলাইন সতর্কতার সহজ টিপস\n"
-            "• কাজের রুটিন বা কোনো কাজ গুছিয়ে শুরু করার পরামর্শ\n"
-            "• যেকোনো সমস্যা বললে কিছুক্ষণ পর নিজে থেকেই খোঁজ নেওয়া যে ঠিক হয়েছে কি না\n\n"
-            "এখন তোমার কোন বিষয়টা নিয়ে হেল্প লাগবে?"
-        ), False
-
-    # 4. Network / internet / device lag
-    net_device_triggers = [
-        "নেট", "net", "ইন্টারনেট", "internet", "ওয়াইফাই", "wifi", "wi-fi",
-        "স্লো", "slow", "ল্যাগ", "lag", "পিং", "ping", "ফোন", "phone", "গরম", "hang", "হ্যাং"
-    ]
-    if any(w in lower for w in net_device_triggers):
-        reply = _pick([
-            (
-                "নেট বা ডিভাইস নিয়ে ঝামেলা হলে শুরুতে এই সহজ ধাপগুলো দেখে নাও:\n"
-                "• ব্যাকগ্রাউন্ডে ভারী অ্যাপ বা ডাউনলোড চলছে কি না চেক করো।\n"
-                "• নেটওয়ার্ক স্লো হলে একবার এয়ারপ্লেন মোড অন-অফ বা রাউটার/ডেটা রিসেট করে দেখো।\n"
-                "• ফোন স্লো বা গরম হলে অপ্রয়োজনীয় ট্যাব/অ্যাপ বন্ধ করে একটু রেস্ট দাও।"
-            ),
-            (
-                "মাঝেমধ্যে নেট বা ফোন হঠাৎ স্লো হয়ে গেলে বিরক্তি লাগে। আগে এগুলো ট্রাই করে দেখো:\n"
-                "• কানেকশন দুর্বল মনে হলে কিছুক্ষণ পর আবার চেষ্টা করো।\n"
-                "• স্টোরেজ একদম ভরে গেলে বা অনেক অ্যাপ একসাথে চললে ফোন ল্যাগ করে—একটু জায়গা খালি রাখো।"
-            )
-        ])
-        return reply, True
-
-    # 5. Account / login / online safety
+    # 4. Account / Login / Security
     account_triggers = [
-        "লগইন", "login", "অ্যাকাউন্ট", "account", "আইডি", "id",
-        "পাসওয়ার্ড", "password", "ওটিপি", "otp", "স্ক্যাম", "scam", "সেফ", "safe"
+        "লগইন", "login", "log in", "অ্যাকাউন্ট", "account", "আইডি", "id",
+        "পাসওয়ার্ড", "password", "otp", "ওটিপি", "hack", "হ্যাক", "safe", "সেফ",
+        "अकाउंट", "लॉगिन", "पासवर्ड", "اکاؤنٹ", "لاگ ان", "پاس ورڈ"
     ]
     if any(w in lower for w in account_triggers):
-        reply = _pick([
-            (
-                "অ্যাকাউন্ট বা অনলাইন সেফটি নিয়ে কয়েকটা জরুরি কথা:\n"
-                "• আগে দেখো যে অ্যাকাউন্টে ঢুকতে চাচ্ছো, সেটার মূল তথ্য বা লগইন ঠিক আছে কি না।\n"
-                "• পাসওয়ার্ড, OTP বা কোনো গোপন তথ্য কখনো কারও সাথে শেয়ার করবে না।\n"
-                "• অপরিচিত লিংক বা সন্দেহজনক অফার এড়িয়ে চললেই বড় ঝুঁকি থেকে বাঁচা যায়।"
-            ),
-            (
-                "লগইন বা অ্যাকাউন্টের বিষয়ে ধাপে ধাপে এগোলে ভুল কম হয়:\n"
-                "• সঠিক ইমেইল/নম্বর ও মাধ্যম ব্যবহার করছো কি না যাচাই করো।\n"
-                "• বারবার চেষ্টা করলে সাময়িক ব্লক বা লিমিট পড়তে পারে, তাই একটু সময় নিয়ে ট্রাই করো।"
+        if style == "ur_hi_script":
+            return (
+                "अकाउंट या लॉगिन से जुड़ी ज़रूरी बातें:\n"
+                "• सही ईमेल, फ़ोन नंबर या लिंक्ड अकाउंट से ही लॉगिन करें।\n"
+                "• बार-बार ग़लत कोशिश करने पर अस्थायी रोक लग सकती है, थोड़ा रुककर दोबारा कोशिश करें।\n"
+                "• पासवर्ड, OTP या कोई भी गोपनीय जानकारी किसी के साथ साझा न करें।"
             )
-        ])
-        return reply, True
-
-    # 6. Routine / productivity / planning
-    routine_triggers = [
-        "রুটিন", "routine", "সময়", "time", "কাজ", "work", "পড়াশোনা", "study", "পরিকল্পনা", "plan"
-    ]
-    if any(w in lower for w in routine_triggers) and len(lower) <= 80:
-        reply = _pick([
-            "কাজ বা রুটিন গুছিয়ে নিতে চাইলে একসাথে সব না ধরে সবচেয়ে জরুরি ১–২টা কাজ আগে শেষ করার টার্গেট নাও। ছোট ছোট ধাপে এগোলে চাপ কম লাগে।",
-            "দিনটা সুন্দরভাবে গুছিয়ে নিতে চাইলে জরুরি কাজগুলো আগে লিখে নাও এবং কাজের মাঝে অল্প একটু ব্রেক রাখো—তাহলে মনোযোগ ধরে রাখা সহজ হয়।"
-        ])
-        return reply, True
-
-    # 7. Thanks / acknowledgment
-    thanks_triggers = ["ধন্যবাদ", "thanks", "thank you", "ঠিক আছে", "ok", "okay", "ওকে", "বুঝলাম"]
-    if any(w in lower for w in thanks_triggers) and len(lower) <= 25:
+        if style == "roman_hi_ur":
+            return (
+                "Account ya login problem mein ye baatein dhyan rakho:\n"
+                "• Sahi email, number ya linked account se hi login try karo.\n"
+                "• Baar-baar try karne par temporary block/limit lag sakti hai, thoda ruk kar try karo.\n"
+                "• Password, OTP ya personal info kabhi kisi ko share mat karo."
+            )
         return (
-            _pick([
-                "একদম ঠিক আছে! আর কোনো হেল্প লাগলে বলো।",
-                "কোনো ব্যাপার না ভাই, দরকার হলে আবার মেসেজ দিও।"
-            ]),
-            False,
+            "অ্যাকাউন্ট বা লগইন নিয়ে ঝামেলা হলে সরাসরি এই বিষয়গুলো চেক করো:\n"
+            "• সঠিক ইমেইল, নম্বর বা লিংকড অ্যাকাউন্ট দিয়েই লগইন করছো কি না দেখো।\n"
+            "• বারবার চেষ্টা করলে সাময়িক লিমিট বা কুলডাউন পড়তে পারে, তাই একটু সময় নিয়ে চেষ্টা করো।\n"
+            "• পাসওয়ার্ড, OTP বা ব্যক্তিগত গোপন তথ্য কখনো কারও সাথে শেয়ার করবে না।"
         )
 
-    # 8. General problem / any other issue user shares -> track for follow-up!
-    short_preview = text if len(text) <= 60 else text[:57] + "..."
-    reply = _pick([
-        (
-            f"বুঝলাম, তুমি '{short_preview}' নিয়ে কথা বলছো। "
-            "এই বিষয়ে আগে শান্ত মাথায় মূল কারণটা কী তা দেখে নাও, আর প্রয়োজন হলে ধাপে ধাপে সমাধান করার চেষ্টা করো।\n"
-            "আমি বিষয়টা নোট করে রাখলাম—একটু পর আবার খোঁজ নেবো যে এটার কী অবস্থা।"
-        ),
-        (
-            f"তোমার কথাটা পেলাম—'{short_preview}'। "
-            "একটু সময় নিয়ে সহজ উপায়টা ট্রাই করে দেখো। আমি পরে আবার জিজ্ঞেস করবো তোমার এটা ঠিক হয়েছে কি না।"
+    # 5. Study / Work / Routine / Advice
+    work_triggers = [
+        "কাজ", "work", "রুটিন", "routine", "পড়াশোনা", "study", "পরামর্শ", "advice",
+        "suggestion", "সাজেশন", "help", "হেল্প", "madad", "मदद", "सलाह", "مدد"
+    ]
+    if any(w in lower for w in work_triggers):
+        if style == "ur_hi_script":
+            return (
+                "किसी काम या रूटीन को आसान बनाने के लिए:\n"
+                "• सबसे ज़रूरी 1–2 काम पहले चुनें और उसी पर ध्यान दें।\n"
+                "• काम को छोटे हिस्सों में बाँटें और बीच में थोड़ा ब्रेक लें।"
+            )
+        if style == "roman_hi_ur":
+            return (
+                "Kaam ya routine manage karne ka simple tarika:\n"
+                "• Sabse zaroori 1–2 kaam pehle pick karo aur unhi par focus karo.\n"
+                "• Bade kaam ko chhote parts mein baant kar thoda break lete raho."
+            )
+        return (
+            "কাজ বা রুটিন গুছিয়ে নিতে চাইলে:\n"
+            "• সবচেয়ে জরুরি ১–২টা কাজ আগে বেছে নিয়ে সেগুলোতে ফোকাস করো।\n"
+            "• বড় কাজকে ছোট ছোট ধাপে ভাগ করো এবং মাঝেমধ্যে অল্প একটু ব্রেক নাও।"
         )
-    ])
-    return reply, True
+
+    # 6. General smart fallback in matching language (no fake timer/note promise!)
+    if style == "ur_hi_script":
+        return "आपकी बात समझी। इस विषय पर सटीक मदद के लिए थोड़ा और साफ़-साफ़ बताइए कि आपको ठीक क्या समस्या या जानकारी चाहिए?"
+    if style == "roman_hi_ur":
+        return "Tumhari baat samajh aayi. Behtar help ke liye thoda clear batao ki tumhe exact kya problem ya jaankari chahiye?"
+    return (
+        "তোমার কথাটা ধরতে পেরেছি। আরেকটু পরিষ্কার করে বলো তো—ঠিক কোন বিষয়টা নিয়ে সমাধান বা তথ্য চাচ্ছো? "
+        "বাংলা, ইংলিশ বা বাংলিশ যেভাবে সুবিধা হয় বলো, সরাসরি উত্তর দিচ্ছি।"
+    )
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "জি বলছি আমি! দৈনন্দিন জীবনের যেকোনো সমস্যা বা কাজে হেল্প লাগলে বলো—সহজ বাংলায় কথা বলি, "
-        "আর দরকার হলে পরে নিজে থেকেই খোঁজ নেবো যে তোমার কাজটা ঠিক হয়েছে কি না।"
+        "জি বলছি আমি! বাংলা, ইংলিশ, বাংলিশ, হিন্দি বা উর্দু—যে ভাষায় সুবিধা হয় লিখে বলো। "
+        "তোমার সমস্যা বা প্রশ্ন শুনে সরাসরি সমাধান দেওয়ার চেষ্টা করবো।"
     )
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "যে কোনো সমস্যা বা বিষয় বাংলায় বা ইংরেজিতে লিখে পাঠাও। সমাধানের আইডিয়া দেওয়ার পর "
-        "আমি কিছুক্ষণ পর নিজে থেকেই জিজ্ঞেস করবো বিষয়টার কী অবস্থা।"
+        "যেকোনো প্রশ্ন বা সমস্যা সরাসরি লিখে পাঠাও (বাংলা, English, Banglish, Hindi, Urdu)। "
+        "অযথা অপেক্ষার কথা না বলে সাথে সাথে কাজের উত্তর দেওয়ার চেষ্টা করবো।"
     )
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message or not update.message.text or not update.effective_chat:
+    if not update.message or not update.message.text:
         return
 
-    chat_id = str(update.effective_chat.id)
-    user_text = update.message.text.strip()
-
-    data = load_followups()
-    current_issue = data.get(chat_id)
-
-    reply_text, should_track = build_daily_help_reply(user_text, current_issue)
-    await update.message.reply_text(reply_text)
-
-    if should_track:
-        summary = user_text if len(user_text) <= 60 else user_text[:57] + "..."
-        now = time.time()
-        data[chat_id] = {
-            "summary": summary,
-            "created_at": now,
-            "next_check_at": now + FOLLOWUP_DELAY_SECONDS,
-            "followup_count": 0,
-            "awaiting_status": True,
-        }
-        save_followups(data)
-    elif current_issue and is_resolved_reply(user_text.lower()):
-        data.pop(chat_id, None)
-        save_followups(data)
-
-
-async def check_followups_job(context: ContextTypes.DEFAULT_TYPE):
-    data = load_followups()
-    if not data:
-        return
-
-    now = time.time()
-    changed = False
-
-    for chat_id, item in list(data.items()):
-        if not item.get("awaiting_status"):
-            continue
-
-        if now >= item.get("next_check_at", 0):
-            count = item.get("followup_count", 0)
-            summary = item.get("summary", "ওই বিষয়টা")
-
-            if count == 0:
-                msg = (
-                    f"আরে, একটু আগে যে '{summary}' নিয়ে কথা বলছিলাম—ওইটার কী অবস্থা? "
-                    "সমাধান হয়েছে নাকি এখনো কোনো সমস্যা হচ্ছে?"
-                )
-            else:
-                msg = (
-                    f"আবার একটু খোঁজ নিলাম—'{summary}' নিয়ে কি কোনো অগ্রগতি হলো, "
-                    "নাকি এখনো হেল্প লাগবে?"
-                )
-
-            try:
-                await context.bot.send_message(chat_id=int(chat_id), text=msg)
-                item["followup_count"] = count + 1
-                changed = True
-
-                if item["followup_count"] >= MAX_FOLLOWUPS_PER_ISSUE:
-                    # Stop automatic pinging after max attempts so user isn't spammed
-                    item["awaiting_status"] = False
-                else:
-                    item["next_check_at"] = now + FOLLOWUP_DELAY_SECONDS
-
-            except Exception as e:
-                logger.warning(f"Could not send follow-up to {chat_id}: {e}")
-                item["awaiting_status"] = False
-                changed = True
-
-    if changed:
-        save_followups(data)
+    reply = build_smart_reply(update.message.text)
+    await update.message.reply_text(reply)
 
 
 def main():
@@ -321,16 +217,7 @@ def main():
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    if app.job_queue:
-        app.job_queue.run_repeating(
-            check_followups_job,
-            interval=CHECK_INTERVAL_SECONDS,
-            first=15,
-        )
-    else:
-        logger.warning("JobQueue is not available; automatic follow-ups require extras.")
-
-    logger.info("Daily Life Helping Bot (No API Key, Auto Follow-up) started...")
+    logger.info("Multi-language smart helping bot started...")
     app.run_polling()
 
 
